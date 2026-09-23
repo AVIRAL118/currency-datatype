@@ -1,0 +1,51 @@
+
+currency price1, price2;
+currency usPrice, europrice, gbpPrice;
+int quantity, count;
+float discountRate, taxRate, ratio;
+currency t_add, t_sub, t_mul_qty, t_mul_rate, t_div_qty, t_div_rate;
+currency t_rate_mul, t_paren, t_add_rate, t_sub_rate, t_mismatch_add, t_mismatch_mul;
+
+price1 = ₹500.00;
+price2 = ₹200.00;
+usPrice = $100.00;
+europrice = €80.00;
+gbpPrice = £50.00;
+quantity = 4;
+count = 2;
+discountRate = 0.10;
+taxRate = 0.18;
+
+input(price1);
+
+t_add = price1 + price2;
+t_sub = price1 - price2;
+ratio = price1 / price2;
+t_mul_qty = price1 * quantity;
+t_mul_rate = price1 * discountRate;
+t_div_qty = price1 / quantity;
+t_div_rate = price1 / discountRate;
+t_rate_mul = discountRate * price1;
+t_paren = (price1 + price2) - price1;
+t_add_rate = price1 + taxRate;
+t_sub_rate = price1 - taxRate;
+t_mismatch_add = price1 + usPrice;
+t_mismatch_mul = price1 * price2;
+
+output(price1);
+output(usPrice);
+output(europrice);
+output(gbpPrice);
+output(ratio);
+output(t_add);
+output(t_sub);
+output(t_mul_qty);
+output(t_mul_rate);
+output(t_div_qty);
+output(t_div_rate);
+output(t_rate_mul);
+output(t_paren);
+output(t_add_rate);
+output(t_sub_rate);
+output(t_mismatch_add);
+output(t_mismatch_mul);
