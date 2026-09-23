@@ -1,7 +1,7 @@
 *.vscode
 .vscode/
-/_pycache_/
-_pycache_/
+/__pycache__/
+__pycache__/
 *._pycache_/
 *.exe
 output.c
