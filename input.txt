@@ -1,10 +1,9 @@
-
 currency price1, price2;
 currency usPrice, europrice, gbpPrice;
 int quantity, count;
 float discountRate, taxRate, ratio;
 currency t_add, t_sub, t_mul_qty, t_mul_rate, t_div_qty, t_div_rate;
-currency t_rate_mul, t_paren, t_add_rate, t_sub_rate, t_mismatch_add, t_mismatch_mul;
+currency t_rate_mul, t_paren, t_add_rate, t_sub_rate, t_mismatch_add, t_mismatch_mul, t_mismatch_div;
 
 price1 = ₹500.00;
 price2 = ₹200.00;
@@ -31,6 +30,7 @@ t_add_rate = price1 + taxRate;
 t_sub_rate = price1 - taxRate;
 t_mismatch_add = price1 + usPrice;
 t_mismatch_mul = price1 * price2;
+t_mismatch_div = price1 / usPrice;
 
 output(price1);
 output(usPrice);
@@ -49,3 +49,5 @@ output(t_add_rate);
 output(t_sub_rate);
 output(t_mismatch_add);
 output(t_mismatch_mul);
+output(t_mismatch_div);
+output(quantity);

@@ -1,15 +1,12 @@
-
-
+import os
 import re
 import subprocess
 import sys
 
-import preprocess as pp  # reuses your existing handlers, symbol table, etc.
-
+import preprocess as pp
 
 C_FILE = "output.c"
 EXE_FILE = "output_exe.exe" if sys.platform.startswith("win") else "./output_exe"
-
 
 RESULT_LINE = re.compile(r'^([A-Za-z_]\w*)\s*=\s*([₹$€£]?)(-?\d+\.\d+)$')
 
@@ -24,13 +21,30 @@ def compile_c(source=C_FILE, exe=EXE_FILE):
         print("Compilation FAILED:")
         print(result.stderr)
         return False
-    print("Compiled successfully.")
+    if result.stderr:
+        # gcc can return 0 but still print warnings (e.g. format mismatches) —
+        # surface them instead of hiding a working-but-suspicious build.
+        print("Compiled with warnings:")
+        print(result.stderr)
+    else:
+        print("Compiled successfully.")
     return True
 
 
 def run_c(exe=EXE_FILE, needed_inputs=None):
-   
     needed_inputs = needed_inputs or []
+
+    # Phase 1, item 7: resolve to an absolute path and check the binary is
+    # actually there before handing it to subprocess. On Windows this turns
+    # a bare CreateProcess stack trace into an actionable message — the
+    # most common cause is antivirus quarantining a freshly-compiled .exe.
+    exe_path = os.path.abspath(exe)
+    if not os.path.exists(exe_path):
+        print(f"\nCompiled executable not found at: {exe_path}")
+        print("If you're on Windows, check whether your antivirus quarantined it "
+              "(common with freshly-built, unsigned .exe files from MinGW/gcc).")
+        return ""
+
     stdin_data = ""
     if needed_inputs:
         print("\nThis program will read input for:", ", ".join(needed_inputs))
@@ -38,9 +52,14 @@ def run_c(exe=EXE_FILE, needed_inputs=None):
         stdin_data = "\n".join(values) + "\n"
 
     print("\n========== RUNNING COMPILED PROGRAM ==========")
-    result = subprocess.run(
-        [exe], input=stdin_data, capture_output=True, text=True, encoding="utf-8"
-    )
+    try:
+        result = subprocess.run(
+            [exe_path], input=stdin_data, capture_output=True, text=True, encoding="utf-8"
+        )
+    except OSError as e:
+        print(f"Failed to launch {exe_path}: {e}")
+        return ""
+
     print(result.stdout, end="")
     if result.returncode != 0:
         print(f"(program exited with code {result.returncode})")
@@ -60,11 +79,12 @@ def parse_runtime_values(program_output):
 
 def print_combined_report(runtime_values):
     print("\n========== COMBINED REPORT (preprocessor + runtime) ==========")
-    print(f"{'Variable':<16}{'Status':<26}{'Value':<14}{'Message'}")
-    print("-" * 90)
+    print(f"{'Variable':<16}{'Status':<26}{'Value':<14}{'Line':<6}Message")
+    print("-" * 100)
     for var in pp.symbol_table:
         diagnostics = pp.var_diagnostics.get(var, [])
-        message_text = "; ".join(text for _, text in diagnostics)
+        message_text = "; ".join(text for _, text, _ in diagnostics)
+        line_no = diagnostics[-1][2] if diagnostics else "-"
 
         if var in pp.invalid_vars:
             status = "SKIPPED (semantic error)"
@@ -76,7 +96,9 @@ def print_combined_report(runtime_values):
             status = "(not printed via output())"
             value = "-"
 
-        print(f"{var:<16}{status:<26}{value:<14}{message_text}")
+        print(f"{var:<16}{status:<26}{value:<14}{str(line_no):<6}{message_text}")
+
+    print(f"\n{pp.error_count} error(s), {pp.warning_count} warning(s) total.")
 
 
 def main():

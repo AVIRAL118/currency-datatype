@@ -1,11 +1,52 @@
 import re
 import ast
 
+# ---------------------------------------------------------------------
+# Config: add a currency here and the assignment regex below updates
+# itself automatically (Phase 1, item 5).
+# ---------------------------------------------------------------------
 CURRENCY_SYMBOLS = ['₹', '$', '€', '£']
+SYMBOL_TO_ISO = {'₹': 'INR', '$': 'USD', '€': 'EUR', '£': 'GBP'}
+
+_SYMBOL_CLASS = "[" + "".join(re.escape(s) for s in CURRENCY_SYMBOLS) + "]"
+# Every statement-matching regex below is anchored with \s*$ at the end.
+# Earlier versions only anchored handle_arithmetic this way, which meant
+# trailing garbage after a declaration/literal/input/output statement
+# (e.g. "a = ₹100.00;a") was silently matched and dropped instead of being
+# flagged — the same class of bug as the original "stray character" issue,
+# just present in more handlers than first thought.
+_CURRENCY_LITERAL_RE = re.compile(
+    r'(\w+)\s*=\s*(' + _SYMBOL_CLASS + r')(-?\d+(\.\d+)?)\s*;\s*$'
+)
+
+# ---------------------------------------------------------------------
+# Global state. reset_state() clears it so preprocess() can be called
+# more than once in the same process (Phase 1, item 6) without old
+# runs bleeding into new ones.
+# ---------------------------------------------------------------------
 symbol_table = {}
-invalid_vars = set()      # variables whose last computed value came from a semantic ERROR
-input_vars = []           # variables read via input(), in the order they appear
-var_diagnostics = {}      # var -> list of (level, text) WARNING/ERROR messages from its last assignment
+invalid_vars = set()
+input_vars = []
+var_diagnostics = {}       # var -> list of (level, text, line_no)
+error_count = 0
+warning_count = 0
+
+
+def reset_state():
+    global error_count, warning_count
+    symbol_table.clear()
+    invalid_vars.clear()
+    input_vars.clear()
+    var_diagnostics.clear()
+    error_count = 0
+    warning_count = 0
+
+
+def iso(symbol):
+    """Human-readable 'INR (₹)' form for a symbol, or '' if none."""
+    if not symbol:
+        return ''
+    return f"{SYMBOL_TO_ISO.get(symbol, '?')} ({symbol})"
 
 
 # ---------------------------------------------------------------------
@@ -13,7 +54,7 @@ var_diagnostics = {}      # var -> list of (level, text) WARNING/ERROR messages 
 # ---------------------------------------------------------------------
 
 def handle_currency_decl(line, symbol_table, messages):
-    match = re.match(r'currency\s+(.+);', line)
+    match = re.match(r'currency\s+(.+);\s*$', line)
     if match:
         var_list = [v.strip() for v in match.group(1).split(',')]
         for var in var_list:
@@ -28,7 +69,7 @@ def handle_currency_decl(line, symbol_table, messages):
 
 
 def handle_plain_decl(line, symbol_table, messages):
-    match = re.match(r'(int|float)\s+(.+);', line)
+    match = re.match(r'(int|float)\s+(.+);\s*$', line)
     if match:
         var_type = match.group(1)
         var_list = [v.strip() for v in match.group(2).split(',')]
@@ -48,12 +89,15 @@ def handle_plain_decl(line, symbol_table, messages):
 # ---------------------------------------------------------------------
 
 def handle_currency_assignment(line, symbol_table, messages):
-    pattern = r'(\w+)\s*=\s*([₹$€£])(\d+(\.\d+)?)\s*;'
-    match = re.match(pattern, line)
+    match = _CURRENCY_LITERAL_RE.match(line)
     if match:
         var, symbol, value = match.group(1), match.group(2), match.group(3)
 
         if var in symbol_table:
+            old_symbol = symbol_table[var].get('currency_symbol')
+            if old_symbol and old_symbol != symbol:
+                messages.append(("WARNING",
+                    f"'{var}' previously held {iso(old_symbol)}; now reassigned to {iso(symbol)}."))
             symbol_table[var]['currency_symbol'] = symbol
         else:
             symbol_table[var] = {
@@ -62,7 +106,7 @@ def handle_currency_assignment(line, symbol_table, messages):
                 'currency_symbol': symbol
             }
 
-        messages.append(("INFO", f"Assigned currency literal {symbol}{value} to '{var}'."))
+        messages.append(("INFO", f"Assigned currency literal {symbol}{value} to '{var}' ({iso(symbol)})."))
         return f"{var}={value}f;"
     return None
 
@@ -72,24 +116,33 @@ def handle_currency_assignment(line, symbol_table, messages):
 # ---------------------------------------------------------------------
 
 def handle_input(line, symbol_table, messages):
-    match = re.match(r'input\((\w+)\)\s*;', line)
+    match = re.match(r'input\((\w+)\)\s*;\s*$', line)
     if match:
         var = match.group(1)
-        messages.append(("INFO", f"Reads a float into '{var}' at runtime (scanf)."))
+        c_type = symbol_table.get(var, {}).get('target_type', 'float')
+        fmt = "%d" if c_type == 'int' else "%f"
+        messages.append(("INFO", f"Reads a {c_type} into '{var}' at runtime (scanf \"{fmt}\")."))
         input_vars.append(var)
-        # Prompt first, so the console is never silently blank while waiting.
-        return f'printf("Enter value for {var}: \\n"); scanf("%f",&{var});'
+        return f'printf("Enter value for {var}: \\n"); scanf("{fmt}",&{var});'
     return None
 
 
 def handle_output(line, symbol_table, messages):
-    match = re.match(r'output\((\w+)\)\s*;', line)
+    match = re.match(r'output\((\w+)\)\s*;\s*$', line)
     if match:
         var = match.group(1)
-        symbol = symbol_table.get(var, {}).get('currency_symbol') or ''
-        messages.append(("INFO", f"Prints '{var}' at runtime, formatted as {symbol or 'plain'}%.2f."))
-        # Label with the variable name so the professor can tell values apart at a glance.
-        return f'printf("{var} = {symbol}%.2f\\n",{var});'
+        if var in invalid_vars:
+            # Phase 1, item 3 (continued): an output() of a variable whose last
+            # assignment was a semantic ERROR must not print an uninitialized
+            # or meaningless float. Say so instead of guessing a number.
+            messages.append(("WARNING", f"'{var}' holds no valid value (last assignment had an ERROR); output skipped."))
+            return f'printf("{var} = N/A (semantic error)\\n");'
+        info = symbol_table.get(var, {})
+        symbol = info.get('currency_symbol') or ''
+        c_type = info.get('target_type', 'float')
+        fmt = "%d" if c_type == 'int' else "%.2f"
+        messages.append(("INFO", f"Prints '{var}' at runtime, formatted as {symbol or 'plain'}{fmt}."))
+        return f'printf("{var} = {symbol}{fmt}\\n",{var});'
     return None
 
 
@@ -107,9 +160,10 @@ def handle_arithmetic(line, symbol_table, messages):
     try:
         tree = ast.parse(expr_str, mode='eval')
     except SyntaxError:
-        return None  # already handled elsewhere (e.g. currency literal)
+        return None  # not a parseable expression; let the caller fall through
 
     result_type = infer_type(tree.body, symbol_table, messages)
+    has_error = any(level == "ERROR" for level, _ in messages)
 
     if result_var in symbol_table:
         symbol_table[result_var]['currency_symbol'] = result_type['symbol']
@@ -122,32 +176,21 @@ def handle_arithmetic(line, symbol_table, messages):
 
     kind_desc = result_type['kind']
     if result_type['symbol']:
-        kind_desc += f" ({result_type['symbol']})"
+        kind_desc += f" ({iso(result_type['symbol'])})"
     messages.append(("RESULT", f"'{result_var}' inferred as {kind_desc}."))
 
-    # Track whether THIS line raised a semantic ERROR, so a downstream
-    # runner can skip reporting back a value that's semantically meaningless.
-    if any(level == "ERROR" for level, _ in messages):
+    if has_error:
         invalid_vars.add(result_var)
+        # Phase 1, item 3: an ERROR must not reach the compiled program as
+        # if it were valid C. Comment the statement out instead of emitting it.
+        return f"/* ERROR: '{line}' skipped — see diagnostics for '{result_var}' */"
     else:
-        invalid_vars.discard(result_var)  # a later valid assignment clears an earlier flag
+        invalid_vars.discard(result_var)
 
-    # Keep the actual WARNING/ERROR text so it can be shown again later
-    # (e.g. in run_pipeline.py's combined report), not just a generic label.
-    relevant = [(level, text) for level, text in messages if level in ("ERROR", "WARNING")]
-    if relevant:
-        var_diagnostics[result_var] = relevant
-    else:
-        var_diagnostics.pop(result_var, None)  # a later clean assignment clears old diagnostics
-
-    return line  # C syntax is already valid
+    return line
 
 
 def infer_type(node, symbol_table, messages):
-    """Recursively walks the expression tree, returning
-    {'kind': 'currency'|'float'|'int', 'symbol': symbol or None}.
-    Any warnings/errors triggered along the way are appended to `messages`."""
-
     if isinstance(node, ast.Name):
         info = symbol_table.get(node.id)
         if info is None:
@@ -175,18 +218,30 @@ def infer_type(node, symbol_table, messages):
 
 
 def combine_types(left, right, op, messages):
-    """Semantic rule table. Appends WARNING/ERROR to `messages` (does not print directly),
-    so the caller can show them attached to the correct source line."""
+    """
+    Currency semantic rules (see SPEC.md for the full table):
+      currency (+/-) currency, same symbol   -> currency
+      currency (+/-) currency, diff symbol   -> ERROR
+      currency  /    currency, same symbol   -> float   (a ratio)
+      currency  /    currency, diff symbol   -> ERROR   (mismatched units)
+      currency  *    currency                -> ERROR   (always; no unit for money^2)
+      currency (*//) int/float               -> currency
+      currency (+/-) int/float                -> WARNING, treated as currency
+    """
     l, r = left['kind'], right['kind']
 
     if l == 'currency' and r == 'currency':
         if op in ('+', '-'):
             if left['symbol'] != right['symbol']:
                 messages.append(("ERROR", f"Currency mismatch: cannot use '{op}' between "
-                                           f"{left['symbol']} and {right['symbol']} values."))
+                                           f"{iso(left['symbol'])} and {iso(right['symbol'])} values."))
                 return {'kind': 'currency', 'symbol': None}
             return {'kind': 'currency', 'symbol': left['symbol']}
         if op == '/':
+            if left['symbol'] != right['symbol']:
+                messages.append(("ERROR", f"Currency mismatch: cannot divide "
+                                           f"{iso(left['symbol'])} by {iso(right['symbol'])} directly."))
+                return {'kind': 'float', 'symbol': None}
             return {'kind': 'float', 'symbol': None}
         if op == '*':
             messages.append(("ERROR", "Cannot multiply two currency values."))
@@ -195,13 +250,13 @@ def combine_types(left, right, op, messages):
     if l == 'currency' and r in ('int', 'float'):
         if op in ('*', '/'):
             return {'kind': 'currency', 'symbol': left['symbol']}
-        messages.append(("WARNING", f"currency ({left['symbol']}) combined with a plain number using '{op}'."))
+        messages.append(("WARNING", f"currency ({iso(left['symbol'])}) combined with a plain number using '{op}'."))
         return {'kind': 'currency', 'symbol': left['symbol']}
 
     if r == 'currency' and l in ('int', 'float'):
         if op == '*':
             return {'kind': 'currency', 'symbol': right['symbol']}
-        messages.append(("WARNING", f"currency ({right['symbol']}) combined with a plain number using '{op}'."))
+        messages.append(("WARNING", f"currency ({iso(right['symbol'])}) combined with a plain number using '{op}'."))
         return {'kind': 'currency', 'symbol': right['symbol']}
 
     kind = 'float' if 'float' in (l, r) else 'int'
@@ -213,20 +268,18 @@ def combine_types(left, right, op, messages):
 # ---------------------------------------------------------------------
 
 def print_symbol_table(symbol_table):
-    print(f"\n{'Variable':<14}{'Source':<10}{'Target':<10}{'Symbol'}")
-    print("-" * 44)
+    print(f"\n{'Variable':<16}{'Source':<10}{'Target':<10}{'ISO':<8}Symbol")
+    print("-" * 56)
     for var, info in symbol_table.items():
-        symbol = info['currency_symbol'] if info['currency_symbol'] else "Not applicable"
-        print(f"{var:<14}{info['source_type']:<10}{info['target_type']:<10}{symbol}")
+        symbol = info['currency_symbol']
+        iso_code = SYMBOL_TO_ISO.get(symbol, '-') if symbol else '-'
+        symbol_disp = symbol if symbol else "Not applicable"
+        print(f"{var:<16}{info['source_type']:<10}{info['target_type']:<10}{iso_code:<8}{symbol_disp}")
 
 
 def generate_c_file(translated_lines, filename="output.c"):
     with open(filename, "w", encoding="utf-8") as f:
         f.write("#include <stdio.h>\n")
-        # On Windows, the console defaults to a codepage that mangles UTF-8
-        # currency symbols (₹, €, £) into garbage bytes. windows.h lets us
-        # switch the console to UTF-8 at startup. This block is skipped
-        # entirely on Linux/macOS (_WIN32 is only defined by Windows compilers).
         f.write("#ifdef _WIN32\n#include <windows.h>\n#endif\n\n")
         f.write("int main()\n{\n")
         f.write("#ifdef _WIN32\n    SetConsoleOutputCP(CP_UTF8);\n#endif\n")
@@ -236,10 +289,15 @@ def generate_c_file(translated_lines, filename="output.c"):
 
 
 # ---------------------------------------------------------------------
-# Pipeline — now with per-line diagnostic tracing
+# Pipeline — per-line diagnostic tracing, now with line numbers and a
+# run summary (Phase 1, item 8).
 # ---------------------------------------------------------------------
 
-def preprocess(source_lines):
+def preprocess(source_lines, reset=True):
+    if reset:
+        reset_state()
+
+    global error_count, warning_count
     output_lines = []
 
     for line_no, raw_line in enumerate(source_lines, start=1):
@@ -261,17 +319,35 @@ def preprocess(source_lines):
         if translated is None:
             translated = handle_arithmetic(line, symbol_table, messages)
         if translated is None:
-            translated = line
-            messages.append(("INFO", "Unrecognized syntax; passed through unchanged."))
+            # Phase 1, item 2: unrecognized syntax is a WARNING, not a silent
+            # pass-through, because it is very likely to break the C compile.
+            translated = f"/* WARNING line {line_no}: unrecognized syntax, skipped -> {line} */"
+            messages.append(("WARNING", "Unrecognized syntax; line skipped, not passed through."))
 
         output_lines.append(translated)
 
-        # ---- per-line trace, printed immediately ----
+        for level, text in messages:
+            if level == "ERROR":
+                error_count += 1
+            elif level == "WARNING":
+                warning_count += 1
+            # keep per-variable diagnostics with their line number attached
+        result_var_match = re.match(r'(\w+)\s*=', line)
+        if result_var_match:
+            rv = result_var_match.group(1)
+            relevant = [(level, text, line_no) for level, text in messages if level in ("ERROR", "WARNING")]
+            if relevant:
+                var_diagnostics[rv] = relevant
+            else:
+                var_diagnostics.pop(rv, None)
+
         print(f"[Line {line_no}] {line}")
         print(f"   translated -> {translated}")
         for level, text in messages:
             print(f"   {level:<7}: {text}")
         print()
+
+    print(f"========== RUN SUMMARY: {error_count} error(s), {warning_count} warning(s) ==========\n")
 
     return output_lines
 
